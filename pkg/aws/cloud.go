@@ -2,76 +2,119 @@ package aws
 
 import (
 	"fmt"
-	"github.com/aws/aws-application-networking-k8s/pkg/aws/services"
 
-	"github.com/aws/aws-application-networking-k8s/pkg/config"
-	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/eks"
+	"github.com/aws/aws-sdk-go/service/vpclattice"
 
-	"github.com/aws/aws-application-networking-k8s/pkg/utils/log"
-
-	"github.com/golang/glog"
+	"github.com/aws/aws-application-networking-k8s/pkg/aws/services"
+	"github.com/aws/aws-application-networking-k8s/pkg/utils/gwlog"
 )
 
+const (
+	TagBase      = "application-networking.k8s.aws/"
+	TagManagedBy = TagBase + "ManagedBy"
+)
+
+//go:generate mockgen -destination cloud_mocks.go -package aws github.com/aws/aws-application-networking-k8s/pkg/aws Cloud
+
+type CloudConfig struct {
+	VpcId       string
+	AccountId   string
+	Region      string
+	ClusterName string
+}
+
 type Cloud interface {
+	Config() CloudConfig
 	Lattice() services.Lattice
-	EKS() services.EKS
+
+	// creates lattice tags with default values populated
+	DefaultTags() services.Tags
+
+	// check if tags map has managedBy tag
+	ContainsManagedBy(tags services.Tags) bool
+
+	// check if managedBy tag set for lattice resource
+	IsArnManaged(arn string) (bool, error)
 }
 
 // NewCloud constructs new Cloud implementation.
-func NewCloud() (Cloud, error) {
-	// TODO: need to pass cfg CloudConfig later
-	sess, _ := session.NewSession()
-
-	sess.Handlers.Send.PushFront(func(r *request.Request) {
-
-		glog.V(4).Info(fmt.Sprintf("Request: %s/%s, Payload: %s", r.ClientInfo.ServiceName, r.Operation.Name, log.Prettify(r.Params)))
-	})
+func NewCloud(log gwlog.Logger, cfg CloudConfig) (Cloud, error) {
+	sess, err := session.NewSession()
+	if err != nil {
+		return nil, err
+	}
 
 	sess.Handlers.Complete.PushFront(func(r *request.Request) {
 		if r.Error != nil {
-
-			glog.ErrorDepth(2, fmt.Sprintf("Failed request: %s/%s, Payload: %s, Error: %s", r.ClientInfo.ServiceName, r.Operation.Name, log.Prettify(r.Params), r.Error))
+			log.Debugw("error",
+				"error", r.Error.Error(),
+				"serviceName", r.ClientInfo.ServiceName,
+				"operation", r.Operation.Name,
+				"params", r.Params,
+			)
 		} else {
-			glog.V(4).Info(fmt.Sprintf("Response: %s/%s, Body: %s", r.ClientInfo.ServiceName, r.Operation.Name, log.Prettify(r.Data)))
-
+			log.Debugw("response",
+				"serviceName", r.ClientInfo.ServiceName,
+				"operation", r.Operation.Name,
+				"params", r.Params,
+			)
 		}
 	})
 
-	return &defaultCloud{
-		// TODO: service
-		vpcLatticeSess: services.NewDefaultLattice(sess, config.Region),
-		eksSess:        services.NewDefaultEKS(sess, config.Region),
-	}, nil
+	lattice := services.NewDefaultLattice(sess, cfg.Region)
+	cl := NewDefaultCloud(lattice, cfg)
+	return cl, nil
 }
 
-var _ Cloud = &defaultCloud{}
+// Used in testing and mocks
+func NewDefaultCloud(lattice services.Lattice, cfg CloudConfig) Cloud {
+	return &defaultCloud{
+		cfg:          cfg,
+		lattice:      lattice,
+		managedByTag: getManagedByTag(cfg),
+	}
+}
 
 type defaultCloud struct {
-	vpcLatticeSess services.Lattice
-	eksSess        services.EKS
+	cfg          CloudConfig
+	lattice      services.Lattice
+	managedByTag string
 }
 
-func (d *defaultCloud) Lattice() services.Lattice {
-	return d.vpcLatticeSess
+func (c *defaultCloud) Lattice() services.Lattice {
+	return c.lattice
 }
 
-func (d *defaultCloud) EKS() services.EKS {
-	return d.eksSess
+func (c *defaultCloud) Config() CloudConfig {
+	return c.cfg
 }
 
-func (d *defaultCloud) GetEKSClusterVPC(name string) string {
-	input := &eks.DescribeClusterInput{
-		Name: aws.String(name),
+func (c *defaultCloud) DefaultTags() services.Tags {
+	tags := services.Tags{}
+	tags[TagManagedBy] = &c.managedByTag
+	return tags
+}
+
+func (c *defaultCloud) ContainsManagedBy(tags services.Tags) bool {
+	tag, ok := tags[TagManagedBy]
+	if !ok || tag == nil {
+		return false
 	}
+	return *tag == c.managedByTag
+}
 
-	result, err := d.eksSess.DescribeCluster(input)
-
+func (c *defaultCloud) IsArnManaged(arn string) (bool, error) {
+	tagsReq := &vpclattice.ListTagsForResourceInput{ResourceArn: &arn}
+	resp, err := c.lattice.ListTagsForResource(tagsReq)
 	if err != nil {
-		fmt.Printf("Erron eks DescridbeCluster %v\n", err)
-		return ""
+		return false, nil
 	}
-	return (result.String())
+	isManaged := c.ContainsManagedBy(resp.Tags)
+	return isManaged, nil
+}
+
+func getManagedByTag(cfg CloudConfig) string {
+	return fmt.Sprintf("%s/%s/%s", cfg.AccountId, cfg.ClusterName, cfg.VpcId)
 }

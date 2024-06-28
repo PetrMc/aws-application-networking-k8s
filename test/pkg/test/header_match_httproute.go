@@ -1,9 +1,9 @@
 package test
 
 import (
-	"github.com/aws/aws-application-networking-k8s/pkg/latticestore"
 	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
@@ -39,6 +39,9 @@ func (env *Framework) NewHeaderMatchHttpRoute(parentRefsGateway *v1beta1.Gateway
 		rules = append(rules, rule)
 	}
 	httpRoute := New(&v1beta1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: env.namespace,
+		},
 		Spec: v1beta1.HTTPRouteSpec{
 			CommonRouteSpec: v1beta1.CommonRouteSpec{
 				ParentRefs: []v1beta1.ParentReference{{
@@ -50,7 +53,5 @@ func (env *Framework) NewHeaderMatchHttpRoute(parentRefsGateway *v1beta1.Gateway
 		},
 	})
 
-	env.TestCasesCreatedServiceNames[latticestore.AWSServiceName(httpRoute.Name, httpRoute.Namespace)] = true
-	env.TestCasesCreatedK8sResource = append(env.TestCasesCreatedK8sResource, httpRoute)
 	return httpRoute
 }

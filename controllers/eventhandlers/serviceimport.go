@@ -3,104 +3,47 @@ package eventhandlers
 import (
 	"context"
 
-	"github.com/golang/glog"
-
-	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/types"
+	"github.com/aws/aws-application-networking-k8s/pkg/model/core"
+	"github.com/aws/aws-application-networking-k8s/pkg/utils/gwlog"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"k8s.io/client-go/util/workqueue"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	gateway_api "sigs.k8s.io/gateway-api/apis/v1beta1"
+	"github.com/aws/aws-application-networking-k8s/pkg/k8s"
 	mcs_api "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
-type enqueueRequestsForServiceImportEvent struct {
+type serviceImportEventHandler struct {
+	log    gwlog.Logger
 	client client.Client
+	mapper *resourceMapper
 }
 
-func NewEqueueRequestServiceImportEvent(client client.Client) handler.EventHandler {
-	return &enqueueRequestsForServiceImportEvent{
+func NewServiceImportEventHandler(log gwlog.Logger, client client.Client) *serviceImportEventHandler {
+	return &serviceImportEventHandler{
+		log:    log,
 		client: client,
+		mapper: &resourceMapper{log: log, client: client},
 	}
 }
 
-func (h *enqueueRequestsForServiceImportEvent) Create(e event.CreateEvent, queue workqueue.RateLimitingInterface) {
-	newServiceImport := e.Object.(*mcs_api.ServiceImport)
-	h.enqueueImpactedService(queue, newServiceImport)
+func (h *serviceImportEventHandler) MapToRoute(routeType core.RouteType) handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(obj client.Object) []reconcile.Request {
+		return h.mapToRoute(obj, routeType)
+	})
 }
 
-func (h *enqueueRequestsForServiceImportEvent) Update(e event.UpdateEvent, queue workqueue.RateLimitingInterface) {
-	oldServiceImport := e.ObjectOld.(*mcs_api.ServiceImport)
-	newServiceImport := e.ObjectNew.(*mcs_api.ServiceImport)
+func (h *serviceImportEventHandler) mapToRoute(obj client.Object, routeType core.RouteType) []reconcile.Request {
+	ctx := context.Background()
+	routes := h.mapper.ServiceImportToRoutes(ctx, obj.(*mcs_api.ServiceImport), routeType)
 
-	if !equality.Semantic.DeepEqual(oldServiceImport, newServiceImport) {
-		h.enqueueImpactedService(queue, newServiceImport)
+	var requests []reconcile.Request
+	for _, route := range routes {
+		routeName := k8s.NamespacedName(route.K8sObject())
+		requests = append(requests, reconcile.Request{NamespacedName: routeName})
+		h.log.Infow("ServiceImport resource change triggered Route update",
+			"serviceName", obj.GetNamespace()+"/"+obj.GetName(), "routeName", routeName, "routeType", routeType)
 	}
-}
-
-func (h *enqueueRequestsForServiceImportEvent) Delete(e event.DeleteEvent, queue workqueue.RateLimitingInterface) {
-	glog.V(6).Infof("TODO serviceExport Delete \n")
-	oldServiceImport := e.Object.(*mcs_api.ServiceImport)
-	h.enqueueImpactedService(queue, oldServiceImport)
-
-}
-
-func (h *enqueueRequestsForServiceImportEvent) Generic(e event.GenericEvent, queue workqueue.RateLimitingInterface) {
-
-}
-
-func (h *enqueueRequestsForServiceImportEvent) enqueueImpactedService(queue workqueue.RateLimitingInterface, serviceImport *mcs_api.ServiceImport) {
-	glog.V(6).Infof("enqueueImpactedHTTPRoute, serviceImport[%v]\n", serviceImport)
-
-	httpRouteList := &gateway_api.HTTPRouteList{}
-
-	h.client.List(context.TODO(), httpRouteList)
-
-	for _, httpRoute := range httpRouteList.Items {
-		if !isServiceImportUsedByHTTPRoute(httpRoute, serviceImport) {
-			continue
-		}
-
-		glog.V(6).Infof("enqueueRequestsForServiceImportEvent --> httproute %v\n", httpRoute)
-		namespacedName := types.NamespacedName{
-			Namespace: httpRoute.Namespace,
-			Name:      httpRoute.Name,
-		}
-
-		queue.Add(reconcile.Request{
-			NamespacedName: namespacedName,
-		})
-
-	}
-
-}
-
-func isServiceImportUsedByHTTPRoute(httpRoute gateway_api.HTTPRoute, serviceImport *mcs_api.ServiceImport) bool {
-	for _, httpRule := range httpRoute.Spec.Rules {
-		for _, httpBackendRef := range httpRule.BackendRefs {
-			if string(*httpBackendRef.BackendObjectReference.Kind) != "serviceimport" {
-				continue
-			}
-
-			if string(httpBackendRef.BackendObjectReference.Name) != serviceImport.Name {
-				continue
-			}
-
-			namespace := httpRoute.Namespace
-			if httpBackendRef.BackendObjectReference.Namespace != nil {
-				namespace = string(*httpBackendRef.BackendObjectReference.Namespace)
-			}
-
-			if namespace != serviceImport.Namespace {
-				continue
-			}
-			return true
-		}
-	}
-	return false
-
+	return requests
 }

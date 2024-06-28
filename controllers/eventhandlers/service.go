@@ -2,171 +2,78 @@ package eventhandlers
 
 import (
 	"context"
-
-	"github.com/golang/glog"
-
+	"github.com/aws/aws-application-networking-k8s/pkg/apis/applicationnetworking/v1alpha1"
+	"github.com/aws/aws-application-networking-k8s/pkg/k8s"
+	"github.com/aws/aws-application-networking-k8s/pkg/model/core"
+	"github.com/aws/aws-application-networking-k8s/pkg/utils/gwlog"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
-
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	"k8s.io/client-go/util/workqueue"
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	gateway_api "sigs.k8s.io/gateway-api/apis/v1beta1"
-	mcs_api "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 )
 
-type enqueueRequetsForServiceEvent struct {
+type serviceEventHandler struct {
+	log    gwlog.Logger
 	client client.Client
+	mapper *resourceMapper
 }
 
-func NewEqueueRequestServiceEvent(client client.Client) handler.EventHandler {
-	return &enqueueRequetsForServiceEvent{
-		client: client,
-	}
+func NewServiceEventHandler(log gwlog.Logger, client client.Client) *serviceEventHandler {
+	return &serviceEventHandler{log: log, client: client,
+		mapper: &resourceMapper{log: log, client: client}}
 }
 
-func (h *enqueueRequetsForServiceEvent) Create(e event.CreateEvent, queue workqueue.RateLimitingInterface) {
-	glog.V(6).Info("Event: service create")
-	service := e.Object.(*corev1.Service)
-	h.enqueueImpactedService(queue, service)
-	h.enqueueImpactedServiceExport(queue, service)
-}
-
-func (h *enqueueRequetsForServiceEvent) Update(e event.UpdateEvent, queue workqueue.RateLimitingInterface) {
-}
-
-func (h *enqueueRequetsForServiceEvent) Delete(e event.DeleteEvent, queue workqueue.RateLimitingInterface) {
-	glog.V(6).Info("Event: service delete")
-	service := e.Object.(*corev1.Service)
-	h.enqueueImpactedService(queue, service)
-	h.enqueueImpactedServiceExport(queue, service)
-}
-
-func (h *enqueueRequetsForServiceEvent) Generic(e event.GenericEvent, queue workqueue.RateLimitingInterface) {
-
-}
-
-func (h *enqueueRequetsForServiceEvent) enqueueImpactedService(queue workqueue.RateLimitingInterface, ep *corev1.Service) {
-	glog.V(6).Infof("Event: enqueueImpactedService: %v\n", ep)
-
-	srv := &corev1.Service{}
-	namespacedName := types.NamespacedName{
-		Namespace: ep.Namespace,
-		Name:      ep.Name,
-	}
-
-	if err := h.client.Get(context.TODO(), namespacedName, srv); err != nil {
-		glog.V(6).Infof("Event: enqueueImpactedService, service not found %v\n", err)
-		return
-	}
-
-	queue.Add(reconcile.Request{
-		NamespacedName: namespacedName,
-	})
-
-}
-
-func (h *enqueueRequetsForServiceEvent) enqueueImpactedServiceExport(queue workqueue.RateLimitingInterface, ep *corev1.Service) {
-	glog.V(6).Infof("Event: enqueueImpactedServiceExport: %v\n", ep)
-
-	srvExport := &mcs_api.ServiceExport{}
-	namespacedName := types.NamespacedName{
-		Namespace: ep.Namespace,
-		Name:      ep.Name,
-	}
-
-	if err := h.client.Get(context.TODO(), namespacedName, srvExport); err != nil {
-		glog.V(6).Infof("Event: enqueueImpactedServiceExport, serviceexport not found %v\n", err)
-		return
-	}
-
-	queue.Add(reconcile.Request{
-		NamespacedName: namespacedName,
+func (h *serviceEventHandler) MapToRoute(routeType core.RouteType) handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(obj client.Object) []reconcile.Request {
+		return h.mapToRoute(obj, routeType)
 	})
 }
 
-type enqueueHTTPRequetsForServiceEvent struct {
-	client client.Client
+func (h *serviceEventHandler) MapToServiceExport() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(obj client.Object) []reconcile.Request {
+		return h.mapToServiceExport(obj)
+	})
 }
 
-func NewEqueueHTTPRequestServiceEvent(client client.Client) handler.EventHandler {
-	return &enqueueHTTPRequetsForServiceEvent{
-		client: client,
-	}
-}
+func (h *serviceEventHandler) mapToServiceExport(obj client.Object) []reconcile.Request {
+	var requests []reconcile.Request
 
-func (h *enqueueHTTPRequetsForServiceEvent) Create(e event.CreateEvent, queue workqueue.RateLimitingInterface) {
-	service := e.Object.(*corev1.Service)
-	h.enqueueImpactedHTTPRoute(queue, service)
-}
-
-func (h *enqueueHTTPRequetsForServiceEvent) Update(e event.UpdateEvent, queue workqueue.RateLimitingInterface) {
-}
-
-func (h *enqueueHTTPRequetsForServiceEvent) Delete(e event.DeleteEvent, queue workqueue.RateLimitingInterface) {
-	service := e.Object.(*corev1.Service)
-	h.enqueueImpactedHTTPRoute(queue, service)
-}
-
-func (h *enqueueHTTPRequetsForServiceEvent) Generic(e event.GenericEvent, queue workqueue.RateLimitingInterface) {
-
-}
-
-func (h *enqueueHTTPRequetsForServiceEvent) enqueueImpactedHTTPRoute(queue workqueue.RateLimitingInterface, ep *corev1.Service) {
-	glog.V(6).Infof("Event: enqueueImpactedHTTPRoute: %v\n", ep)
-
-	httpRouteList := &gateway_api.HTTPRouteList{}
-
-	h.client.List(context.TODO(), httpRouteList)
-
-	for _, httpRoute := range httpRouteList.Items {
-		if !isServiceUsedByHTTPRoute(httpRoute, ep) {
-			continue
-		}
-		glog.V(6).Infof("Event: enqueueImpactedHTTPRoute --> httproute %v \n", httpRoute)
-		namespacedName := types.NamespacedName{
-			Namespace: httpRoute.Namespace,
-			Name:      httpRoute.Name,
-		}
-		queue.Add(reconcile.Request{
-			NamespacedName: namespacedName,
+	ctx := context.Background()
+	svc := h.mapToService(ctx, obj)
+	svcExport := h.mapper.ServiceToServiceExport(ctx, svc)
+	if svcExport != nil {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: k8s.NamespacedName(svcExport),
 		})
-
+		h.log.Infow("Service impacting resource change triggered ServiceExport update",
+			"serviceName", svc.Namespace+"/"+svc.Name)
 	}
-
+	return requests
 }
 
-func isServiceUsedByHTTPRoute(httpRoute gateway_api.HTTPRoute, ep *corev1.Service) bool {
-	for _, httpRule := range httpRoute.Spec.Rules {
-		for _, httpBackendRef := range httpRule.BackendRefs {
-			//glog.V(6).Infof("isServiceUsedByHTTPRoute httpBackendRef %v, %v\n", httpBackendRef.BackendObjectReference, ep.Name)
-			if string(*httpBackendRef.BackendObjectReference.Kind) != "service" {
-				glog.V(6).Infof("isServiceUsedByHTTPRoute: kind %v\n", string(*httpBackendRef.BackendObjectReference.Kind))
-				continue
-			}
-
-			if string(httpBackendRef.BackendObjectReference.Name) != ep.Name {
-				//glog.V(6).Infof("isServiceUsedByHTTPRoute, name %v\n", string(httpBackendRef.BackendObjectReference.Name))
-				continue
-			}
-
-			namespace := httpRoute.Namespace
-			if httpBackendRef.BackendObjectReference.Namespace != nil {
-				namespace = string(*httpBackendRef.BackendObjectReference.Namespace)
-			}
-
-			if namespace != ep.Namespace {
-				//glog.V(6).Infof("isServiceUsedByHTTPRoute, namespace %v\n", namespace)
-				continue
-			}
-
-			return true
-
-		}
+func (h *serviceEventHandler) mapToService(ctx context.Context, obj client.Object) *corev1.Service {
+	switch typed := obj.(type) {
+	case *corev1.Service:
+		return typed
+	case *v1alpha1.TargetGroupPolicy:
+		return h.mapper.TargetGroupPolicyToService(ctx, typed)
+	case *corev1.Endpoints:
+		return h.mapper.EndpointsToService(ctx, typed)
 	}
-	return false
+	return nil
+}
 
+func (h *serviceEventHandler) mapToRoute(obj client.Object, routeType core.RouteType) []reconcile.Request {
+	ctx := context.Background()
+	svc := h.mapToService(ctx, obj)
+	routes := h.mapper.ServiceToRoutes(ctx, svc, routeType)
+
+	var requests []reconcile.Request
+	for _, route := range routes {
+		routeName := k8s.NamespacedName(route.K8sObject())
+		requests = append(requests, reconcile.Request{NamespacedName: routeName})
+		h.log.Infow("Service impacting resource change triggered Route update",
+			"serviceName", svc.Namespace+"/"+svc.Name, "routeName", routeName, "routeType", routeType)
+	}
+	return requests
 }

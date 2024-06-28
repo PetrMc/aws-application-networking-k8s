@@ -15,30 +15,23 @@ type Rule struct {
 }
 
 const (
-	// K8S HTTPRouteMatch
-	MatchByPath = "HTTPRouteMatch"
-	// K8S HTTPRouteFilter
-	MatchByFilter = "HTTPRouteFilter"
-
 	MAX_NUM_OF_MATCHED_HEADERS = 5
 )
 
 type RuleSpec struct {
-	ServiceName      string `json:"name"`
-	ServiceNamespace string `json:"namespace"`
-	ListenerPort     int64  `json:"port"`
-	ListenerProtocol string `json:"protocol"`
-	// PathMatch
-	PathMatchValue  string `json:"pathmatchvalue"`
-	PathMatchExact  bool   `json:"pathmatchexact"`
-	PathMatchPrefix bool   `json:"pathmatchprefix"`
-	// Header
-	NumOfHeaderMatches int `json:"numofheadermatches"`
+	ServiceName        string `json:"name"`
+	ServiceNamespace   string `json:"namespace"`
+	ListenerPort       int64  `json:"port"`
+	ListenerProtocol   string `json:"protocol"`
+	PathMatchValue     string `json:"pathmatchvalue"`
+	PathMatchExact     bool   `json:"pathmatchexact"`
+	PathMatchPrefix    bool   `json:"pathmatchprefix"`
+	NumOfHeaderMatches int    `json:"numofheadermatches"`
 	MatchedHeaders     [MAX_NUM_OF_MATCHED_HEADERS]vpclattice.HeaderMatch
-
-	RuleID     string     `json:"id"`
-	Action     RuleAction `json:"action"`
-	CreateTime time.Time  `json:"time"`
+	Method             string     `json:"method"`
+	RuleID             string     `json:"id"`
+	Action             RuleAction `json:"action"`
+	CreateTime         time.Time  `json:"time"`
 }
 
 type RuleAction struct {

@@ -1,55 +1,121 @@
-## Developer Guide
+# Developer Guide
+
+## Tools
+
+Before you start you need to have following:
+
+- aws account - https://aws.amazon.com/
+- aws cli - https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html
+- eksctl - https://github.com/eksctl-io/eksctl/blob/main/README.md#installation
+- kubectl - https://docs.aws.amazon.com/eks/latest/userguide/install-kubectl.html
+- go v1.20.x - https://go.dev/doc/install
+- yq - https://github.com/mikefarah/yq#install
+- jq - https://jqlang.github.io/jq/
+- make 
+
+After pulling repo toolchain.sh script will install other dependencies.
 
 ```bash
-# Learn available `make` commands
-make help
-
-# This only needs to be run once after checking out the repo, and will install tools/codegen required for development
-# If you see this err "Go workspace's "bin" directory is not in PATH. Run 'export PATH="$PATH:${GOPATH:-$HOME/go}/bin"'."
-# fix it and rerun following.
 make toolchain
+```
 
-# Run this before submitting code
-make presubmit
+## Cluster Setup
 
-# Install CRDs (which only need once)
+To run controller in cluster or in development mode you need an EKS cluster. It's a one time setup.
+Running controller in development mode will start controller locally and connects to EKS cluster, 
+this is preferable way for local development.
+
+Once you have eksctl and aws account you can create EKS cluster. It's handy to set env variables, since many places relies on them.
+
+```bash
+export AWS_ACCOUNT= {your account}
+export AWS_REGION= {region with eks and lattice}
+export CLUSTER_NAME=dev-cluster
+```
+
+Create an EKS cluster and allow Lattice traffic into cluster.
+
+```bash
+eksctl create cluster --name $CLUSTER_NAME --region $AWS_REGION
+
+/ update security group to allow lattice traffic
+PREFIX_LIST_ID=$(aws ec2 describe-managed-prefix-lists --query "PrefixLists[?PrefixListName=="\'com.amazonaws.$AWS_REGION.vpc-lattice\'"].PrefixListId" | jq -r '.[]')
+MANAGED_PREFIX=$(aws ec2 get-managed-prefix-list-entries --prefix-list-id $PREFIX_LIST_ID --output json  | jq -r '.Entries[0].Cidr')
+CLUSTER_SG=$(aws eks describe-cluster --name $CLUSTER_NAME --output json| jq -r '.cluster.resourcesVpcConfig.clusterSecurityGroupId')
+aws ec2 authorize-security-group-ingress --group-id $CLUSTER_SG --cidr $MANAGED_PREFIX --protocol -1
+
+eksctl utils associate-iam-oidc-provider --cluster $CLUSTER_NAME --approve --region $AWS_REGION
+
+aws iam create-policy \
+   --policy-name VPCLatticeControllerIAMPolicy \
+   --policy-document file://examples/recommended-inline-policy.json
+   
+export VPCLatticeControllerIAMPolicyArn=$(aws iam list-policies --query 'Policies[?PolicyName==`VPCLatticeControllerIAMPolicy`].Arn' --output text)
+
+eksctl create iamserviceaccount \
+   --cluster=$CLUSTER_NAME \
+   --namespace=aws-application-networking-system \
+   --name=gateway-api-controller \
+   --attach-policy-arn=$VPCLatticeControllerIAMPolicyArn \
+   --override-existing-serviceaccounts \
+   --region $AWS_REGION \
+   --approve
+```
+
+Once cluster is ready. We need to apply CRDs for gateway-api resources.
+
+```bash
 kubectl apply -f config/crds/bases/k8s-gateway-v0.6.1.yaml
 kubectl apply -f config/crds/bases/multicluster.x-k8s.io_serviceexports.yaml
 kubectl apply -f config/crds/bases/multicluster.x-k8s.io_serviceimports.yaml
+kubectl apply -f config/crds/bases/externaldns.k8s.io_dnsendpoints.yaml
+kubectl apply -f config/crds/bases/application-networking.k8s.aws_targetgrouppolicies.yaml
+kubectl apply -f config/crds/bases/application-networking.k8s.aws_vpcassociationpolicies.yaml
+kubectl apply -f config/crds/bases/application-networking.k8s.aws_accesslogpolicies.yaml
 kubectl apply -f examples/gatewayclass.yaml
+```
 
-# Run the controller against the Kubernetes cluster pointed to by `kubectl config current-context`
-# specify REGION where your cluster is running
+When e2e tests are terminated during execution, it might break clean-up stage and resources will leak. To delete dangling resources manually use cleanup script:
+
+```bash
+make e2e-clean
+```
+
+## Local Development
+
+A minimal sanity check on changes can be done with make presubmit. This command will also run on PR.
+
+```
+make presubmit
+```
+
+Start controller in development mode, that will point to cluster (see setup above).
+
+```
+// should be region of the cluster
 REGION=us-west-2 make run
+```
 
-# or run it in debug mode
-GATEWAY_API_CONTROLLER_LOGLEVEL=debug make run
+You can explore a collection of different yaml configurations in the examples folder that can be applied to cluster.
 
-# to run it against specific lattice service endpoint
+To run it against specific lattice service endpoint.
+
+```
 LATTICE_ENDPOINT=https://vpc-lattice.us-west-2.amazonaws.com/ make run
 ```
 
-To easier load environment variables, if you hope to run the controller by GoLand IDE locally, you could run the `scripts/load_env_variables.sh`
+To easier load environment variables, if you hope to run the controller by GoLand IDE locally, you could run the `./scripts/load_env_variables.sh`
 And use "EnvFile" GoLand plugin to read the env variables from the generated `.env` file.
 
-### End-to-End Testing
+## End-to-End Testing
 
-Run the following command to run the end-to-end tests against the Kubernetes cluster pointed to by `kubectl config current-context`:
-You should set up the correct `REGION` env variable and create `non-default`
-namespace if it doesn't exist.
+For larger changes it's recommended to run e2e suites on your local cluster.
 
-NOTE: You'll need to allow in-bound traffics from lattice prefix list in the security
-groups of your cluster.
-
-```bash
-# create non-default namespace if it hasn't existed yet
-kubectl create namespace non-default
-
-export REGION=us-west-2
-make e2etest
+```
+REGION=us-west-2 make e2e-test
 ```
 
-Pass `FOCUS` environment variable to run some specific test cases based on filter condition.
+You can use `FOCUS` environment variable to run some specific test cases based on filter condition.
 You could assign the string in the Describe("xxxxxx") or It("xxxxxx") to the FOCUS environment variable to run the specific test cases.
 ```go
 var _ = Describe("HTTPRoute path matches", func() {
@@ -61,7 +127,7 @@ var _ = Describe("HTTPRoute path matches", func() {
 ```
 export FOCUS="HTTPRoute should support multiple path matches"
 export REGION=us-west-2
-make e2etest
+make e2e-test
 ```
 
 For example, to run the test case "HTTPRoute should support multiple path matches", you could run the following command:
@@ -76,17 +142,31 @@ Notice: the prerequisites for running the end-to-end tests success are:
 
 After all test cases running finished, in the `AfterSuite()` function, it will clean up k8s and vpc lattice resource created by current test cases running.
 
-Before sending a Pull Request, usually you should run the `make e2etest` to make sure all e2e tests pass.
+## Contributing
 
-### Make Docker Image
+Before sending a Pull Request, you should run unit tests:
+
+```sh
+make presubmit
+```
+
+For larger, functional changes, run e2e tests:
+```sh
+make e2e-test
+```
+
+It is recommended to run `make e2e-test` in both environments where `DNSEndpoint` CRD exists and does not exist,
+as the controller is designed to support both use cases.
+
+## Make Docker Image
 
 ```
 make docker-build
 ```
 
-### Deploy Controller inside a Kubernetes Cluster
+## Deploy Controller inside a Kubernetes Cluster
 
-#### Generate deploy.yaml
+### Generate deploy.yaml
 
 ```
 make build-deploy

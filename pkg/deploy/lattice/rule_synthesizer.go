@@ -3,21 +3,31 @@ package lattice
 import (
 	"context"
 	"errors"
-	"github.com/golang/glog"
+	"fmt"
+
+	"github.com/aws/aws-sdk-go/aws"
 
 	"github.com/aws/aws-application-networking-k8s/pkg/latticestore"
 	"github.com/aws/aws-application-networking-k8s/pkg/model/core"
-	latticemodel "github.com/aws/aws-application-networking-k8s/pkg/model/lattice"
+	model "github.com/aws/aws-application-networking-k8s/pkg/model/lattice"
+	"github.com/aws/aws-application-networking-k8s/pkg/utils/gwlog"
 )
 
 type ruleSynthesizer struct {
+	log          gwlog.Logger
 	rule         RuleManager
 	stack        core.Stack
 	latticestore *latticestore.LatticeDataStore
 }
 
-func NewRuleSynthesizer(ruleManager RuleManager, stack core.Stack, store *latticestore.LatticeDataStore) *ruleSynthesizer {
+func NewRuleSynthesizer(
+	log gwlog.Logger,
+	ruleManager RuleManager,
+	stack core.Stack,
+	store *latticestore.LatticeDataStore,
+) *ruleSynthesizer {
 	return &ruleSynthesizer{
+		log:          log,
 		rule:         ruleManager,
 		stack:        stack,
 		latticestore: store,
@@ -25,18 +35,18 @@ func NewRuleSynthesizer(ruleManager RuleManager, stack core.Stack, store *lattic
 }
 
 func (r *ruleSynthesizer) Synthesize(ctx context.Context) error {
-	var resRule []*latticemodel.Rule
+	var resRule []*model.Rule
 
 	err := r.stack.ListResources(&resRule)
+	if err != nil {
+		r.log.Debugf("Error while listing rules %s", err)
+	}
 
-	glog.V(6).Infof("Synthesize rule = %v, err :%v \n", resRule, err)
 	updatePriority := false
 
 	for _, rule := range resRule {
 		ruleResp, err := r.rule.Create(ctx, rule)
-
 		if err != nil {
-			glog.V(6).Infof("Failed to create rule %v, err :%v \n", rule, err)
 			return err
 		}
 
@@ -44,110 +54,111 @@ func (r *ruleSynthesizer) Synthesize(ctx context.Context) error {
 			updatePriority = true
 		}
 
-		glog.V(6).Infof("Synthesise rule %v, ruleResp:%v \n", rule, ruleResp)
+		r.log.Debugf("Synthesise rule %s, ruleResp: %+v", rule.Spec.RuleID, ruleResp)
 		rule.Status = &ruleResp
 	}
 
 	// handle delete
 	sdkRules, err := r.getSDKRules(ctx)
-	glog.V(6).Infof("rule>>> synthesize,  sdkRules :%v err: %v \n", sdkRules, err)
+	if err != nil {
+		r.log.Debugf("Error while getting rules due to %s", err)
+	}
 
-	for _, sdkrule := range sdkRules {
-		_, err := r.findMatchedRule(ctx, sdkrule.RuleID, sdkrule.ListenerID, sdkrule.ServiceID, resRule)
-
-		if err == nil {
-			continue
+	for _, sdkRule := range sdkRules {
+		_, err := r.findMatchedRule(ctx, sdkRule.RuleID, sdkRule.ListenerID, sdkRule.ServiceID, resRule)
+		if err != nil {
+			r.log.Debugf("Error while finding matching rule for service %s, listener %s, rule %s. %s",
+				sdkRule.ServiceID, sdkRule.ListenerID, sdkRule.RuleID, err)
+			err := r.rule.Delete(ctx, sdkRule.RuleID, sdkRule.ListenerID, sdkRule.ServiceID)
+			if err != nil {
+				r.log.Debugf("Error while deleting rule for service %s, listener %s, rule %s. %s",
+					sdkRule.ServiceID, sdkRule.ListenerID, sdkRule.RuleID, err)
+			}
 		}
-
-		glog.V(2).Infof("rule-synthersize >>> deleting rule %v\n", *sdkrule)
-		r.rule.Delete(ctx, sdkrule.RuleID, sdkrule.ListenerID, sdkrule.ServiceID)
 	}
 
 	if updatePriority {
-		//r.rule.
 		err := r.rule.Update(ctx, resRule)
-		glog.V(6).Infof("rule --synthesie update rule priority err: %v\n", err)
+		if err != nil {
+			r.log.Debugf("Error while updating rule priority for rules %+v. %s", resRule, err)
+		}
 	}
 
 	return nil
 }
 
-func (r *ruleSynthesizer) findMatchedRule(ctx context.Context, sdkRuleID string, listern string, service string,
-	resRule []*latticemodel.Rule) (*latticemodel.Rule, error) {
-	var modelRule *latticemodel.Rule = nil
-
-	glog.V(6).Infof("findMatchedRule: skdRuleID %v, listener %v, service %v \n", sdkRuleID, listern, service)
-	sdkRuleDetail, err := r.rule.Get(ctx, service, listern, sdkRuleID)
-
+func (r *ruleSynthesizer) findMatchedRule(
+	ctx context.Context,
+	sdkRuleId string,
+	listener string,
+	service string,
+	resRule []*model.Rule,
+) (*model.Rule, error) {
+	var modelRule *model.Rule = nil
+	sdkRuleDetail, err := r.rule.Get(ctx, service, listener, sdkRuleId)
 	if err != nil {
-		glog.V(6).Infof("findMatchRule, rule not found err:%v\n", err)
-		return modelRule, errors.New("rule not found")
+		return modelRule, err
 	}
 
 	if sdkRuleDetail.Match == nil ||
 		sdkRuleDetail.Match.HttpMatch == nil {
-		glog.V(6).Infof("no HTTPMatch ")
-		return modelRule, errors.New("rule not found")
+		return modelRule, errors.New("rule not found, no HTTPMatch")
 	}
 
 	for _, modelRule := range resRule {
-		sameRule := isRulesSame(modelRule, sdkRuleDetail)
-
-		if !sameRule {
-			continue
+		sameRule := isRulesSame(r.log, modelRule, sdkRuleDetail)
+		if sameRule {
+			return modelRule, nil
 		}
-
-		glog.V(6).Infof("findMatchedRule: found matched modelRule %v \n", modelRule)
-		return modelRule, nil
 	}
 
-	glog.V(6).Infof("findMatchedRule, sdk rule %v not found in model rules %v \n", sdkRuleID, resRule)
-	return modelRule, errors.New("failed to find matching rule in model")
+	return modelRule, fmt.Errorf("failed to find matching rule in model for rule %s", sdkRuleId)
 }
 
-func (r *ruleSynthesizer) getSDKRules(ctx context.Context) ([]*latticemodel.RuleStatus, error) {
-	var sdkRules []*latticemodel.RuleStatus
-	var resService []*latticemodel.Service
-	var resListener []*latticemodel.Listener
-	var resRule []*latticemodel.Rule
+func (r *ruleSynthesizer) getSDKRules(ctx context.Context) ([]*model.RuleStatus, error) {
+	var sdkRules []*model.RuleStatus
+	var resService []*model.Service
+	var resListener []*model.Listener
+	var resRule []*model.Rule
 
 	err := r.stack.ListResources(&resService)
-
-	glog.V(6).Infof("getSDKRules service: %v err: %v \n", resService, err)
+	if err != nil {
+		r.log.Errorf("Error listing services: %s", err)
+	}
 
 	err = r.stack.ListResources(&resListener)
-
-	glog.V(6).Infof("getSDKRules, listener: %v err: %v \n ", resListener, err)
+	if err != nil {
+		r.log.Errorf("Error listing listeners: %s", err)
+	}
 
 	err = r.stack.ListResources(&resRule)
-	glog.V(6).Infof("getSDKRules, rule %v err %v \n", resRule, err)
+	if err != nil {
+		r.log.Errorf("Error listing rules: %s", err)
+	}
 
 	for _, service := range resService {
-		latticeService, err := r.latticestore.GetLatticeService(service.Spec.Name, service.Spec.Namespace)
-
+		latticeService, err := r.rule.Cloud().Lattice().FindService(ctx, service)
 		if err != nil {
-			glog.V(6).Infof("getSDKRules: failed to find service in store service %v, err %v \n", service, err)
-			return sdkRules, errors.New("getSDKRules: failed to find service in store")
+			return sdkRules, fmt.Errorf("failed to find service %s-%s, %s",
+				service.Spec.Name, service.Spec.Namespace, err)
 		}
 
 		listeners, err := r.latticestore.GetAllListeners(service.Spec.Name, service.Spec.Namespace)
+		if err != nil {
+			return sdkRules, err
+		}
 
 		if len(listeners) == 0 {
-			glog.V(6).Infof("getSDKRules, no listeners in store service %v \n", service)
 			return sdkRules, errors.New("failed to find listener in store")
-
 		}
 
 		for _, listener := range listeners {
-			rules, _ := r.rule.List(ctx, latticeService.ID, listener.ID)
-
+			rules, _ := r.rule.List(ctx, aws.StringValue(latticeService.Id), listener.ID)
 			sdkRules = append(sdkRules, rules...)
-
 		}
 	}
 
 	return sdkRules, nil
-
 }
 
 func (r *ruleSynthesizer) PostSynthesize(ctx context.Context) error {

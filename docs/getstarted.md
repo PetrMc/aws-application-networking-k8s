@@ -1,4 +1,4 @@
-# Get Start Using the AWS Gateway API Controller
+# Getting Started with AWS Gateway API Controller
 
 Once you have [deployed the AWS Gateway API Controller](deploy.md), this guide helps you get started using the controller.
 
@@ -108,8 +108,8 @@ This example creates a single cluster in a single VPC, then configures two route
 
 
    ```bash
-   ratesdns=$(kubectl get httproute rates -o json | jq -r .status.parents[].conditions[].message)
-   inventorydns=$(kubectl get httproute inventory -o json | jq -r .status.parents[].conditions[].message)
+   ratesdns=$(kubectl get httproute rates -o json | jq -r '.status.parents[].conditions[0].message')
+   inventorydns=$(kubectl get httproute inventory -o json | jq -r '.status.parents[].conditions[0].message')
    ```
    
    remove preceding extra text:
@@ -126,6 +126,10 @@ confirm that the URLs are stored correctly:
 
 ```bash
 echo $ratesFQDN $inventoryFQDN
+```
+
+```
+rates-default-034e0056410499722.7d67968.vpc-lattice-svcs.us-west-2.on.aws inventory-default-0c54a5e5a426f92c2.7d67968.vpc-lattice-svcs.us-west-2.on.aws
 ```
 
 **Check service connectivity**
@@ -226,3 +230,32 @@ The following figure illustrates this:
    Requsting to Pod(inventory-ver1-74fc59977-wg8br): Inventory-ver1 handler pod....
    ```
    You can see that the traffic is distributed between *inventory-ver1* and *inventory-ver2* as expected.
+
+## IPv6 Support
+
+IPv6 address type is automatically used for your services and pods if
+[your cluster is configured to use IPv6 addresses](https://docs.aws.amazon.com/eks/latest/userguide/cni-ipv6.html).
+
+```bash
+# To create an IPv6 cluster
+kubectl apply -f examples/ipv6-cluster.yaml
+```
+
+If your cluster is configured to be dual-stack, you can set the IP address type
+of your service using the `ipFamilies` field. For example:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ipv4-target-in-dual-stack-cluster
+spec:
+  ipFamilies:
+    - "IPv4"
+  selector:
+    app: parking
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8090
+```
